@@ -1,0 +1,61 @@
+# Databricks Asset Bundle — churn on Free Edition (serverless).
+# dev/prod are two UC schemas in the one Free Edition workspace; only `schema`
+# (and the derived model name) changes between them.
+bundle:
+  name: churn-dbx
+
+include:
+  - resources/jobs.yml
+  # Serving is a Databricks App. If a workspace forbids App compute, comment this out —
+  # the three jobs deploy independently.
+  - resources/app.yml
+
+# Built once, referenced by every serverless job's environment (see jobs.yml).
+# The build subprocess may only expose `python3` (and a stale local build/ dir can
+# shadow pypa-build), so pick the first interpreter whose pypa-build actually works
+# — `python` in CI, the repo venv locally.
+artifacts:
+  churn_dbx_wheel:
+    type: whl
+    # Clean dist/ FIRST: `python -m build` appends, so a stale wheel (e.g. an older
+    # version) would linger and the job's `../dist/*.whl` glob would install BOTH —
+    # pip then resolves to the wrong one and old code runs on serverless. Removing
+    # dist/ each build guarantees the glob matches exactly the wheel just built.
+    build: bash -c 'rm -rf dist build src/*.egg-info; for p in python python3 ../.venv/bin/python; do if "$p" -m build --version >/dev/null 2>&1; then exec "$p" -m build --wheel; fi; done; echo "pypa-build not found (pip install build)"; exit 1'
+    path: .
+
+# The workspace host is taken from the DATABRICKS_HOST env var / CLI profile (DAB
+# does not allow interpolation on the auth host), so it is not set here.
+variables:
+  catalog:
+    description: Unity Catalog holding churn data + model. Free Edition default is "workspace".
+    default: workspace
+  schema:
+    description: UC schema for this target (dev/prod map here).
+    default: churn_dev
+  volume:
+    description: UC Volume that holds the uploaded raw CSVs.
+    default: raw
+  model_name:
+    description: 3-level UC model name for serving.
+    default: workspace.churn_dev.churn_model
+  notification_email:
+    description: Address that job on_failure alerts are sent to.
+    default: hainam.nguyen.ict@gmail.com
+  warehouse_id:
+    description: SQL warehouse the serving App queries the predictions table through.
+    default: 57fee99eb6fa6c6d  # this workspace's Serverless Starter Warehouse; override per workspace
+
+targets:
+  dev:
+    mode: development
+    default: true
+    variables:
+      schema: churn_dev
+      model_name: ${var.catalog}.churn_dev.churn_model
+
+  prod:
+    mode: production
+    variables:
+      schema: churn_prod
+      model_name: ${var.catalog}.churn_prod.churn_model

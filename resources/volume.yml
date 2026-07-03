@@ -1,0 +1,23 @@
+# UC schema + Volume for the raw CSVs.
+#
+# NOT included by databricks.yml by default: scripts/deploy.py creates the schema
+# and volume via the SDK (CREATE ... IF NOT EXISTS) in its `upload` stage, because
+# the volume must exist BEFORE files are uploaded and before `bundle deploy` runs,
+# and because DAB `development` mode would prefix a bundle-managed schema name.
+#
+# To let the bundle own them instead, add this file to the `include:` list in
+# databricks.yml and drop the ensure-schema/volume step from deploy.py.
+resources:
+  schemas:
+    churn_schema:
+      catalog_name: ${var.catalog}
+      name: ${var.schema}
+      comment: Customer 360 churn — features, predictions, drift baseline, model.
+
+  volumes:
+    raw_data:
+      catalog_name: ${var.catalog}
+      schema_name: ${var.schema}
+      name: ${var.volume}
+      volume_type: MANAGED
+      comment: Raw pipe-delimited case-study CSVs uploaded by scripts/deploy.py.

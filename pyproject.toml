@@ -1,0 +1,54 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "churn_dbx"
+version = "0.1.8"
+description = "Customer 360 churn — PySpark ML jobs for Databricks Free Edition"
+requires-python = ">=3.10"
+# Runtime deps kept MINIMAL: Databricks serverless already provides pyspark, mlflow,
+# pandas, numpy, pyarrow, and databricks-sdk. Installing those into the serverless
+# environment perturbs (and can break) the provided Spark build, which is what made
+# the wheel import fail. Only scikit-learn is added (used by train/drift metrics).
+dependencies = [
+    "scikit-learn",
+]
+
+[project.optional-dependencies]
+# Provided by Databricks at runtime; needed only for local dev / CI (Spark-local).
+local = ["pyspark>=3.5", "mlflow>=2.11", "numpy", "pandas", "pyarrow", "databricks-sdk"]
+dev = ["pytest", "ruff", "build"]
+
+# The Databricks Asset Bundle python_wheel_task references these entry points by
+# name (package_name = "churn_dbx", entry_point = one of the keys below). Keeping
+# orchestration bound to console-scripts means jobs never import module paths.
+[project.scripts]
+churn-dbx-materialize = "churn_dbx.cli:materialize"
+churn-dbx-train = "churn_dbx.cli:train"
+churn-dbx-promote = "churn_dbx.cli:promote"
+churn-dbx-score = "churn_dbx.cli:score"
+churn-dbx-monitor = "churn_dbx.cli:monitor"
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+# conftest pins the process timezone to UTC before importing pyspark, so those
+# imports intentionally sit below executable code.
+"tests/conftest.py" = ["E402"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::UserWarning",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["churn_dbx*"]

@@ -1,0 +1,143 @@
+# Serverless Jobs — churn_pipeline (materialize->train->promote->trigger scoring),
+# churn_batch_scoring (daily), churn_monitoring (drift->condition->retrain). All
+# three: queued, max_concurrent_runs 1, timeout, retries on idempotent tasks only
+# (not promote — its non-zero exit is the rollback), email on failure.
+resources:
+  jobs:
+
+    churn_pipeline:
+      name: churn-pipeline
+      # No schedule: churn_monitoring triggers it on drift, so retraining is
+      # driven by the signal, not a cron.
+      tags:
+        project: churn
+        pipeline: train_promote
+      max_concurrent_runs: 1
+      timeout_seconds: 3600
+      queue:
+        enabled: true
+      email_notifications:
+        on_failure:
+          - ${var.notification_email}
+      environments:
+        - environment_key: default
+          spec: &serverless_env
+            environment_version: "2"
+            dependencies:
+              - ../dist/*.whl
+      tasks:
+        - task_key: materialize
+          environment_key: default
+          # Idempotent (overwrites the features table); safe to retry on a flake.
+          max_retries: 1
+          min_retry_interval_millis: 60000
+          retry_on_timeout: false
+          python_wheel_task:
+            package_name: churn_dbx
+            entry_point: churn-dbx-materialize
+            # --execution-date lets the checkpoint roll the cutoff to the run date (see checkpoint.py).
+            parameters: ["--mode", "uc", "--catalog", "${var.catalog}", "--schema", "${var.schema}", "--volume", "${var.volume}", "--execution-date", "{{job.trigger.time.iso_date}}"]
+
+        - task_key: train
+          depends_on: [{ task_key: materialize }]
+          environment_key: default
+          # A retry at worst registers one extra model version; promote picks the latest.
+          max_retries: 1
+          min_retry_interval_millis: 60000
+          retry_on_timeout: false
+          python_wheel_task:
+            package_name: churn_dbx
+            entry_point: churn-dbx-train
+            parameters: ["--mode", "uc", "--catalog", "${var.catalog}", "--schema", "${var.schema}", "--volume", "${var.volume}", "--execution-date", "{{job.trigger.time.iso_date}}"]
+
+        # Quality gate. A non-zero exit fails the job and leaves the champion alias
+        # untouched -- that failure-to-promote is the automatic rollback. NO retries:
+        # a rejection is a decision, not a flake.
+        - task_key: promote
+          depends_on: [{ task_key: train }]
+          environment_key: default
+          python_wheel_task:
+            package_name: churn_dbx
+            entry_point: churn-dbx-promote
+            parameters: ["--mode", "uc", "--catalog", "${var.catalog}", "--schema", "${var.schema}", "--volume", "${var.volume}"]
+
+        # On a passing gate, score straight away against the new champion.
+        - task_key: trigger_batch_scoring
+          depends_on: [{ task_key: promote }]
+          run_job_task:
+            job_id: ${resources.jobs.churn_batch_scoring.id}
+
+    churn_batch_scoring:
+      name: churn-batch-scoring
+      tags:
+        project: churn
+        pipeline: scoring
+      max_concurrent_runs: 1
+      timeout_seconds: 1800
+      queue:
+        enabled: true
+      email_notifications:
+        on_failure:
+          - ${var.notification_email}
+      environments:
+        - environment_key: default
+          spec: *serverless_env
+      tasks:
+        - task_key: batch_score
+          environment_key: default
+          # Idempotent (overwrites the dated partition); safe to retry.
+          max_retries: 1
+          min_retry_interval_millis: 60000
+          retry_on_timeout: false
+          python_wheel_task:
+            package_name: churn_dbx
+            entry_point: churn-dbx-score
+            parameters: ["--mode", "uc", "--catalog", "${var.catalog}", "--schema", "${var.schema}", "--volume", "${var.volume}"]
+      schedule:
+        quartz_cron_expression: "0 0 4 * * ?"
+        timezone_id: UTC
+
+    churn_monitoring:
+      name: churn-monitoring
+      tags:
+        project: churn
+        pipeline: monitoring
+      max_concurrent_runs: 1
+      timeout_seconds: 1200
+      queue:
+        enabled: true
+      email_notifications:
+        on_failure:
+          - ${var.notification_email}
+      environments:
+        - environment_key: default
+          spec: *serverless_env
+      tasks:
+        # drift_check publishes its ok/breach token as the `decision` task value.
+        # Read-only + emits a token; safe to retry on a flake.
+        - task_key: drift_check
+          environment_key: default
+          max_retries: 1
+          min_retry_interval_millis: 60000
+          retry_on_timeout: false
+          python_wheel_task:
+            package_name: churn_dbx
+            entry_point: churn-dbx-monitor
+            parameters: ["--mode", "uc", "--catalog", "${var.catalog}", "--schema", "${var.schema}", "--volume", "${var.volume}"]
+
+        - task_key: decide_retrain
+          depends_on: [{ task_key: drift_check }]
+          condition_task:
+            op: EQUAL_TO
+            left: "{{tasks.drift_check.values.decision}}"
+            right: "breach"
+
+        - task_key: trigger_retraining
+          depends_on:
+            - task_key: decide_retrain
+              outcome: "true"
+          run_job_task:
+            job_id: ${resources.jobs.churn_pipeline.id}
+      schedule:
+        quartz_cron_expression: "0 0 3 * * ?"
+        timezone_id: UTC

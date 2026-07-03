@@ -1,0 +1,47 @@
+# Code-evolution gate: PR -> main and push -> main run the Spark-local tests, the
+# linter, and a bundle validation.
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+      DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17 (Spark runtime)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install
+        run: pip install -e ".[local,dev]"
+
+      - name: Lint (blocking)
+        run: ruff check src tests scripts
+
+      - name: Test (Spark-local)
+        run: pytest -q
+
+      - name: Install Databricks CLI
+        uses: databricks/setup-cli@main
+
+      # Validation needs workspace auth; skipped automatically when secrets are absent
+      # (e.g. PRs from forks) so the test+lint gate still runs.
+      - name: Validate bundle
+        if: ${{ env.DATABRICKS_HOST != '' }}
+        run: databricks bundle validate -t dev

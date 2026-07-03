@@ -1,0 +1,47 @@
+# Databricks verification + deployment, tag-driven:
+#   tag with -rc  (e.g. v1.2.0-rc1) -> dev  workspace/schema
+#   tag without   (e.g. v1.2.0)     -> prod workspace/schema (protected environment)
+# Placeholder with proper syntax: the actual deploy step runs only when the repo
+# variable DATABRICKS_DEPLOY_ENABLED == 'true' and the environment secrets are set.
+name: Deploy to Databricks
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    # rc tags map to the `dev` GitHub Environment; release tags to `prod`, which is
+    # configured as a protected environment (required reviewers) in repo settings.
+    environment: ${{ contains(github.ref_name, 'rc') && 'dev' || 'prod' }}
+    env:
+      DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+      DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install build + CLI
+        run: pip install build
+      - uses: databricks/setup-cli@main
+
+      - name: Resolve target from tag
+        id: target
+        run: |
+          if [[ "${{ github.ref_name }}" == *rc* ]]; then
+            echo "name=dev" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=prod" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Validate bundle (${{ steps.target.outputs.name }})
+        run: databricks bundle validate -t ${{ steps.target.outputs.name }}
+
+      - name: Deploy bundle (${{ steps.target.outputs.name }})
+        if: ${{ vars.DATABRICKS_DEPLOY_ENABLED == 'true' }}
+        run: python scripts/deploy.py deploy -t ${{ steps.target.outputs.name }}

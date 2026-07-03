@@ -1,0 +1,25 @@
+# Databricks App — the serving endpoint (deliverable 6), deployed via the bundle.
+# `bundle deploy` uploads ../app and starts a FastAPI on Apps compute. It reads the
+# `predictions` Delta table over the bound SQL warehouse and answers
+# GET /predict/{customer_id}. Access is gated by the App's built-in workspace OAuth.
+resources:
+  apps:
+    churn_serving:
+      name: churn-serving
+      description: Serves pre-computed churn scores from the predictions table.
+      source_code_path: ../app
+      config:
+        # app.py binds DATABRICKS_APP_PORT itself (the port the Apps proxy routes to).
+        command: ["python", "app.py"]
+        env:
+          - name: CHURN_DBX_CATALOG
+            value: ${var.catalog}
+          - name: CHURN_DBX_SCHEMA
+            value: ${var.schema}
+          - name: CHURN_DBX_WAREHOUSE_ID
+            value: ${var.warehouse_id}
+      resources:
+        - name: predictions-warehouse
+          sql_warehouse:
+            id: ${var.warehouse_id}
+            permission: CAN_USE
